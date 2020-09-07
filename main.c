@@ -9,7 +9,7 @@
 #include <readline/history.h>
 
 void parseString(char *str, char **tokens);
-bool fileRedirection(char **parsedcmd);
+bool fileRedirection(char **parsedcmd, bool *invalidFile);
 void processCommand(char **parsedcmd);
 
 int main()
@@ -47,35 +47,33 @@ int main()
 				cmdR[j - (i + 1)] = (char *)NULL;
 
 				piping = true;
-				pipe(pipefd);
 				break;
 			}
 			i++;
 		}
 
-		i = 0;
-		while (cmdL[i])
-		{
-			printf("cmdL[%d] is %s\n", i, cmdL[i]);
-			i++;
-		}
+		// i = 0;
+		// while (cmdL[i])
+		// {
+		// 	printf("cmdL[%d] is %s\n", i, cmdL[i]);
+		// 	i++;
+		// }
 
-		i = 0;
-		while (cmdR[i])
-		{
-			printf("cmdR[%d] is %s\n", i, cmdR[i]);
-			i++;
-		}
+		// i = 0;
+		// while (cmdR[i])
+		// {
+		// 	printf("cmdR[%d] is %s\n", i, cmdR[i]);
+		// 	i++;
+		// }
 
-		printf("%d\n", piping);
+		// printf("%d\n", piping);
 
 		if (piping)
 		{
-			printf("reached\n");
+			pipe(pipefd);
 			cpid = fork();
 			if (cpid == 0)
 			{
-				printf("pipe 1");
 				close(pipefd[0]);
 				dup2(pipefd[1], STDOUT_FILENO);
 				processCommand(cmdL);
@@ -88,13 +86,14 @@ int main()
 			cpid = fork();
 			if (cpid == 0)
 			{
-				printf("pipe 2");
 				close(pipefd[1]);
 				dup2(pipefd[0], STDIN_FILENO);
 				processCommand(cmdR);
 			}
 			else
 			{
+				close(pipefd[0]);
+				close(pipefd[1]);
 				wait((int *)NULL);
 			}
 		}
@@ -140,7 +139,7 @@ void parseString(char *str, char **tokens)
 	// free(to_free);
 }
 
-bool fileRedirection(char **parsedcmd)
+bool fileRedirection(char **parsedcmd, bool *invalidFile)
 {
 	bool fileRedirect = false;
 	int i = 0;
@@ -148,10 +147,15 @@ bool fileRedirection(char **parsedcmd)
 	{
 		if (strcmp(parsedcmd[i], "<") == 0)
 		{
-			//TODO need to check if file exist
 			int ofd = open(parsedcmd[i + 1], 0644);
-			dup2(ofd, 0);
-
+			if (ofd != -1)
+			{
+				dup2(ofd, 0);
+			}
+			else
+			{
+				*invalidFile = true;
+			}
 			fileRedirect = true;
 		}
 		else if (strcmp(parsedcmd[i], ">") == 0)
@@ -177,26 +181,30 @@ bool fileRedirection(char **parsedcmd)
 
 void processCommand(char **parsedcmd)
 {
-	bool fileRedirect = fileRedirection(parsedcmd);
+	bool invalidFile = false;
+	bool fileRedirect = fileRedirection(parsedcmd, &invalidFile);
 
 	if (fileRedirect)
 	{
-		char *cmd[64] = {NULL};
-		int i = 0;
-		while (parsedcmd[i] != (char *)NULL)
+		if (!invalidFile)
 		{
-			if (strcmp(parsedcmd[i], ">") != 0 && strcmp(parsedcmd[i], "<") != 0 && strcmp(parsedcmd[i], "2>") != 0)
+			char *cmd[64] = {NULL};
+			int i = 0;
+			while (parsedcmd[i] != (char *)NULL)
 			{
-				cmd[i] = parsedcmd[i];
+				if (strcmp(parsedcmd[i], ">") != 0 && strcmp(parsedcmd[i], "<") != 0 && strcmp(parsedcmd[i], "2>") != 0)
+				{
+					cmd[i] = parsedcmd[i];
+				}
+				else
+				{
+					break;
+				}
+				i++;
 			}
-			else
-			{
-				break;
-			}
-			i++;
-		}
 
-		execvp(cmd[0], cmd);
+			execvp(cmd[0], cmd);
+		}
 	}
 	else
 	{
