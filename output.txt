@@ -1,7 +1,1 @@
-Makefile
-README.md
 hello.txt
-main.c
-main.o
-output.txt
-yash

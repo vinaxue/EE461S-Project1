@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -8,46 +9,106 @@
 #include <readline/history.h>
 
 void parseString(char *str, char **tokens);
+bool fileRedirection(char **parsedcmd);
+void processCommand(char **parsedcmd);
 
 int main()
 {
 	int cpid;
+	int pipefd[2];
 	char *inString;
 	char *parsedcmd[64] = {NULL};
 
 	while (inString = readline("# "))
 	{
+		bool piping = false;
+
 		parseString(inString, parsedcmd);
-		cpid = fork();
-		if (cpid == 0)
+
+		int i = 0;
+		char *cmdL[64] = {NULL};
+		char *cmdR[64] = {NULL};
+
+		while (parsedcmd[i] != (char *)NULL)
 		{
-			int i = 0;
-			while (parsedcmd[i] != (char *)NULL)
+			if (strcmp(parsedcmd[i], "|") == 0)
 			{
-				if (strcmp(parsedcmd[i], ">") == 0)
+				int j;
+				for (j = 0; j < i; j++)
 				{
-					fork();
-					int ofd = creat(parsedcmd[i + 1], 0644);
-					dup2(ofd, 1);
-					execlp(parsedcmd[i - 1], parsedcmd[i - 1], (char *)NULL);
+					cmdL[j] = parsedcmd[j];
 				}
-				else if (strcmp(parsedcmd[i], "<") == 0)
+				cmdL[j] = (char *)NULL;
+
+				for (j = i + 1; j < sizeof(parsedcmd) / sizeof(char *); j++)
 				{
-					fork();
-					if (access(parsedcmd[i + 1], F_OK))
-					{
-						int ofd = open(parsedcmd[i + 1], 0644);
-						dup2(ofd,   bgtr5fdxa0);
-						execlp(parsedcmd[i - 1], parsedcmd[i - 1], (char *)NULL);
-					}
+					cmdR[j - (i + 1)] = parsedcmd[j];
 				}
-				i++;
+				cmdR[j - (i + 1)] = (char *)NULL;
+
+				piping = true;
+				pipe(pipefd);
+				break;
 			}
-			execvp(parsedcmd[0], parsedcmd);
+			i++;
+		}
+
+		i = 0;
+		while (cmdL[i])
+		{
+			printf("cmdL[%d] is %s\n", i, cmdL[i]);
+			i++;
+		}
+
+		i = 0;
+		while (cmdR[i])
+		{
+			printf("cmdR[%d] is %s\n", i, cmdR[i]);
+			i++;
+		}
+
+		printf("%d\n", piping);
+
+		if (piping)
+		{
+			printf("reached\n");
+			cpid = fork();
+			if (cpid == 0)
+			{
+				printf("pipe 1");
+				close(pipefd[0]);
+				dup2(pipefd[1], STDOUT_FILENO);
+				processCommand(cmdL);
+			}
+			else
+			{
+				wait((int *)NULL);
+			}
+
+			cpid = fork();
+			if (cpid == 0)
+			{
+				printf("pipe 2");
+				close(pipefd[1]);
+				dup2(pipefd[0], STDIN_FILENO);
+				processCommand(cmdR);
+			}
+			else
+			{
+				wait((int *)NULL);
+			}
 		}
 		else
 		{
-			wait((int *)NULL);
+			cpid = fork();
+			if (cpid == 0)
+			{
+				processCommand(parsedcmd);
+			}
+			else
+			{
+				wait((int *)NULL);
+			}
 		}
 	}
 }
@@ -70,5 +131,75 @@ void parseString(char *str, char **tokens)
 	tokens[i] = (char *)NULL;
 
 	i = 0;
+	// while (tokens[i])
+	// {
+	// 	printf("token[%d] is %s\n", i, tokens[i]);
+	// 	i++;
+	// }
+
 	// free(to_free);
+}
+
+bool fileRedirection(char **parsedcmd)
+{
+	bool fileRedirect = false;
+	int i = 0;
+	while (parsedcmd[i] != (char *)NULL)
+	{
+		if (strcmp(parsedcmd[i], "<") == 0)
+		{
+			//TODO need to check if file exist
+			int ofd = open(parsedcmd[i + 1], 0644);
+			dup2(ofd, 0);
+
+			fileRedirect = true;
+		}
+		else if (strcmp(parsedcmd[i], ">") == 0)
+		{
+			int ofd = creat(parsedcmd[i + 1], 0644);
+			dup2(ofd, 1);
+
+			fileRedirect = true;
+		}
+		else if (strcmp(parsedcmd[i], "2>") == 0)
+		{
+
+			int ofd = creat(parsedcmd[i + 1], 0644);
+			dup2(ofd, 2);
+
+			fileRedirect = true;
+		}
+		i++;
+	}
+
+	return fileRedirect;
+}
+
+void processCommand(char **parsedcmd)
+{
+	bool fileRedirect = fileRedirection(parsedcmd);
+
+	if (fileRedirect)
+	{
+		char *cmd[64] = {NULL};
+		int i = 0;
+		while (parsedcmd[i] != (char *)NULL)
+		{
+			if (strcmp(parsedcmd[i], ">") != 0 && strcmp(parsedcmd[i], "<") != 0 && strcmp(parsedcmd[i], "2>") != 0)
+			{
+				cmd[i] = parsedcmd[i];
+			}
+			else
+			{
+				break;
+			}
+			i++;
+		}
+
+		execvp(cmd[0], cmd);
+	}
+	else
+	{
+		execvp(parsedcmd[0], parsedcmd);
+	}
 }

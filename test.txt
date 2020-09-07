@@ -1,0 +1,7 @@
+Makefile
+README.md
+main.c
+main.o
+output.txt
+test.txt
+yash
