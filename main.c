@@ -11,17 +11,34 @@
 void parseString(char *str, char **tokens);
 bool fileRedirection(char **parsedcmd, bool *invalidFile);
 void processCommand(char **parsedcmd);
+void sigHandler(int signo);
+
+struct Job
+{
+	char *cmd;
+	int status;
+} typedef job;
 
 int main()
 {
-	int cpid;
+	pid_t cpid;
 	int pipefd[2];
 	char *inString;
 	char *parsedcmd[64] = {NULL};
+	int status;
+	job *foreground = malloc(sizeof(job));
+	job *background = malloc(sizeof(job));
+
+	if (signal(SIGINT, sigHandler) == SIG_ERR)
+		perror("Couldn't install signal handler");
+	// signal(SIGTTOU, SIG_IGN);
+	// signal(SIGTTIN, SIG_IGN);
 
 	while (inString = readline("# "))
 	{
 		bool piping = false;
+		bool fg = true;
+		bool bg = false;
 
 		parseString(inString, parsedcmd);
 
@@ -47,45 +64,75 @@ int main()
 				cmdR[j - (i + 1)] = (char *)NULL;
 
 				piping = true;
-				break;
 			}
+			else if (strcmp(parsedcmd[i], "fg") == 0)
+			{
+				fg == true;
+				bg == false;
+			}
+			else if (strcmp(parsedcmd[i], "bg") == 0 || strcmp(parsedcmd[i], "&") == 0)
+			{
+				bg == true;
+				fg == false;
+			}
+
 			i++;
 		}
-
-		// i = 0;
-		// while (cmdL[i])
-		// {
-		// 	printf("cmdL[%d] is %s\n", i, cmdL[i]);
-		// 	i++;
-		// }
-
-		// i = 0;
-		// while (cmdR[i])
-		// {
-		// 	printf("cmdR[%d] is %s\n", i, cmdR[i]);
-		// 	i++;
-		// }
-
-		// printf("%d\n", piping);
 
 		if (piping)
 		{
 			pipe(pipefd);
-			cpid = fork();
-			if (cpid == 0)
+			pid_t cpidL = fork();
+			if (cpidL == 0)
 			{
+				signal(SIGINT, SIG_DFL);
+				// setpgid(0, 0);
 				close(pipefd[0]);
 				dup2(pipefd[1], STDOUT_FILENO);
 				processCommand(cmdL);
 			}
 			else
 			{
-				wait((int *)NULL);
+				if (bg)
+				{
+					do
+					{
+						int w = waitpid(cpid, &status, WNOHANG);
+						if (w == -1)
+						{
+							perror("waitpid");
+							exit(EXIT_FAILURE);
+						}
+
+						if (WIFEXITED(status))
+						{
+							printf("exited, status=%d\n", WEXITSTATUS(status));
+						}
+						else if (WIFSIGNALED(status))
+						{
+							printf("killed by signal %d\n", WTERMSIG(status));
+						}
+						else if (WIFSTOPPED(status))
+						{
+							printf("stopped by signal %d\n", WSTOPSIG(status));
+						}
+						else if (WIFCONTINUED(status))
+						{
+							printf("continued\n");
+						}
+					} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+				}
+				else
+				{
+					waitpid(cpidL, NULL, 0);
+				}
 			}
 
 			cpid = fork();
 			if (cpid == 0)
 			{
+				signal(SIGINT, SIG_DFL);
+				// setpgid(0, 0);
 				close(pipefd[1]);
 				dup2(pipefd[0], STDIN_FILENO);
 				processCommand(cmdR);
@@ -94,7 +141,40 @@ int main()
 			{
 				close(pipefd[0]);
 				close(pipefd[1]);
-				wait((int *)NULL);
+				if (bg)
+				{
+					do
+					{
+						int w = waitpid(cpid, &status, WNOHANG);
+						if (w == -1)
+						{
+							perror("waitpid");
+							exit(EXIT_FAILURE);
+						}
+
+						if (WIFEXITED(status))
+						{
+							printf("exited, status=%d\n", WEXITSTATUS(status));
+						}
+						else if (WIFSIGNALED(status))
+						{
+							printf("killed by signal %d\n", WTERMSIG(status));
+						}
+						else if (WIFSTOPPED(status))
+						{
+							printf("stopped by signal %d\n", WSTOPSIG(status));
+						}
+						else if (WIFCONTINUED(status))
+						{
+							printf("continued\n");
+						}
+					} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+				}
+				else
+				{
+					// tcsetpgrp(0, cpidL);
+					waitpid(cpid, NULL, 0);
+				}
 			}
 		}
 		else
@@ -102,11 +182,45 @@ int main()
 			cpid = fork();
 			if (cpid == 0)
 			{
+				signal(SIGINT, SIG_DFL);
+				// printf("%d", setpgid(0, 0));
 				processCommand(parsedcmd);
 			}
 			else
 			{
-				wait((int *)NULL);
+				if (bg)
+				{
+					do
+					{
+						int w = waitpid(cpid, &status, WNOHANG);
+						if (w == -1)
+						{
+							perror("waitpid");
+							exit(EXIT_FAILURE);
+						}
+
+						if (WIFEXITED(status))
+						{
+							printf("exited, status=%d\n", WEXITSTATUS(status));
+						}
+						else if (WIFSIGNALED(status))
+						{
+							printf("killed by signal %d\n", WTERMSIG(status));
+						}
+						else if (WIFSTOPPED(status))
+						{
+							printf("stopped by signal %d\n", WSTOPSIG(status));
+						}
+						else if (WIFCONTINUED(status))
+						{
+							printf("continued\n");
+						}
+					} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+				}
+				else
+				{
+					waitpid(cpid, NULL, 0);
+				}
 			}
 		}
 	}
@@ -210,4 +324,26 @@ void processCommand(char **parsedcmd)
 	{
 		execvp(parsedcmd[0], parsedcmd);
 	}
+}
+
+void sigHandler(int signo)
+{
+	pid_t pid = getpid();
+
+	switch (signo)
+	{
+	case SIGINT:
+		//ctrl-c
+		//quit current foreground process only
+		printf("\n");
+		break;
+	case SIGTSTP:
+		//ctrl-z
+		//send sigtsto to current foreground process
+		break;
+	case EOF:
+		exit(0);
+		break;
+	}
+	signal(SIGINT, sigHandler);
 }

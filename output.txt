@@ -1,0 +1,9 @@
+Makefile
+README.md
+loop
+loop.c
+main.c
+main.o
+output.txt
+temp.txt
+yash
