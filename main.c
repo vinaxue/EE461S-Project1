@@ -7,30 +7,57 @@
 #include <sys/wait.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <errno.h>
+
+struct Process
+{
+	int pid;
+	int pgid;
+	char **argv;
+} typedef process;
+
+struct Job
+{
+	int jobid;
+
+	//2, stopped, 1 = running, 0 = done, -1 = remove
+	int state;
+	char *cmd;
+	process *plist[2];
+	int nproc;
+	bool fg;
+} typedef job;
+
+job **jobs;
+int jobNo;
+int jobsLength;
+int currentFgJob = 0;
+extern int errno;
 
 void parseString(char *str, char **tokens);
 bool fileRedirection(char **parsedcmd, bool *invalidFile);
 void processCommand(char **parsedcmd);
+void cleanUpJobs();
+void printJobs();
+void printBgJobs();
 void sigHandler(int signo);
-
-struct Job
-{
-	char *cmd;
-	int status;
-} typedef job;
 
 int main()
 {
-	pid_t cpid;
+	int cpid;
 	int pipefd[2];
+	int status;
 	char *inString;
 	char *parsedcmd[64] = {NULL};
-	int status;
-	job *foreground = malloc(sizeof(job));
-	job *background = malloc(sizeof(job));
 
-	if (signal(SIGINT, sigHandler) == SIG_ERR)
-		perror("Couldn't install signal handler");
+	jobNo = 1;
+	jobsLength = 0;
+	jobs = (job **)malloc(20 * sizeof(job *));
+
+	signal(SIGINT, sigHandler);
+	signal(SIGTSTP, sigHandler);
+	signal(SIGCHLD, sigHandler);
+
 	// signal(SIGTTOU, SIG_IGN);
 	// signal(SIGTTIN, SIG_IGN);
 
@@ -38,7 +65,9 @@ int main()
 	{
 		bool piping = false;
 		bool fg = true;
-		bool bg = false;
+		bool jobCmd = false;
+		bool fgCmd = false;
+		bool bgCmd = false;
 
 		parseString(inString, parsedcmd);
 
@@ -48,6 +77,11 @@ int main()
 
 		while (parsedcmd[i] != (char *)NULL)
 		{
+			if (strcmp(parsedcmd[i], "jobs") == 0)
+			{
+				jobCmd = true;
+				break;
+			}
 			if (strcmp(parsedcmd[i], "|") == 0)
 			{
 				int j;
@@ -63,68 +97,196 @@ int main()
 				}
 				cmdR[j - (i + 1)] = (char *)NULL;
 
+				// printf("%s", parsedcmd[j - (i + 2)]);
+				// if (strcmp(parsedcmd[j - (i + 2)], "&") == 0)
+				// {
+				// 	fg = false;
+				// 	cmdR[j - (i + 2)] = (char *)NULL;
+				// }
+
 				piping = true;
 			}
 			else if (strcmp(parsedcmd[i], "fg") == 0)
 			{
-				fg == true;
-				bg == false;
+				fgCmd = true;
 			}
-			else if (strcmp(parsedcmd[i], "bg") == 0 || strcmp(parsedcmd[i], "&") == 0)
+			else if (strcmp(parsedcmd[i], "bg") == 0)
 			{
-				bg == true;
-				fg == false;
+				bgCmd = true;
+			}
+			else if (strcmp(parsedcmd[i], "&") == 0)
+			{
+				fg = false;
+				parsedcmd[i] = (char *)NULL;
 			}
 
 			i++;
 		}
 
-		if (piping)
+		if (!jobCmd && !bgCmd && !fgCmd)
+		{
+			jobs[jobsLength] = (job *)malloc(sizeof(job));
+			jobs[jobsLength]->jobid = jobNo;
+			jobs[jobsLength]->cmd = inString;
+			jobs[jobsLength]->state = 1;
+			jobs[jobsLength]->fg = fg;
+
+			if (piping)
+				jobs[jobsLength]->nproc = 2;
+			else
+				jobs[jobsLength]->nproc = 1;
+
+			for (int i = 0; i < jobs[jobsLength]->nproc; i++)
+			{
+				jobs[jobsLength]->plist[i] = (process *)malloc(sizeof(process));
+			}
+
+			jobsLength++;
+			jobNo++;
+		}
+
+		if (jobCmd)
+		{
+			printJobs();
+		}
+		else if (fgCmd)
+		{
+			for (int i = jobsLength - 1; i >= 0; i--)
+			{
+				if (!jobs[i]->fg || jobs[i]->state == 2)
+				{
+					char *recent = i == jobsLength - 1 ? "+" : "-";
+					char *s = "Running";
+					kill(jobs[i]->plist[0]->pgid, SIGCONT);
+
+					jobs[i]->fg = true;
+					printf("[%d]%s  %s        %s \n", jobs[i]->jobid, recent, s, jobs[i]->cmd);
+					jobs[i]->state = 1;
+
+					int status;
+
+					currentFgJob = jobs[i]->plist[0]->pgid;
+					pid_t result = waitpid(jobs[i]->plist[0]->pgid, &status, WUNTRACED);
+					currentFgJob = 0;
+
+					signal(SIGINT, sigHandler);
+					signal(SIGTSTP, sigHandler);
+					signal(SIGCHLD, sigHandler);
+
+					for (int i = 0; i < jobsLength; i++)
+					{
+						if (jobs[i]->fg)
+						{
+							waitpid(cpid, &status, WNOHANG);
+
+							if (jobs[i]->state == 0 || WIFSIGNALED(status))
+							{
+								jobs[i]->state = -1;
+							}
+							else if (WIFSTOPPED(status))
+							{
+								//stopped
+								kill(jobs[i]->plist[0]->pid, SIGTSTP);
+								jobs[i]->state = 2;
+								jobs[i]->fg = false;
+							}
+							else if (WIFEXITED(status))
+							{
+								jobs[i]->state = 0;
+							}
+							else
+							{
+								jobs[i]->state = 1;
+							}
+						}
+					}
+
+					break;
+				}
+			}
+		}
+		else if (bgCmd)
+		{
+			for (int i = jobsLength - 1; i >= 0; i--)
+			{
+				if (jobs[i]->state == 2)
+				{
+					char *recent = i == jobsLength - 1 ? "+" : "-";
+					char *s = "Running";
+
+					// signal(SIGINT, sigHandler);
+					// signal(SIGTSTP, sigHandler);
+					// signal(SIGCHLD, sigHandler);
+					kill(jobs[i]->plist[0]->pgid, SIGCONT);
+					printf("%s", jobs[i]->cmd + strlen(jobs[i]->cmd));
+
+					if (strcmp(jobs[i]->cmd + strlen(jobs[i]->cmd) - 1, " ") != 0)
+						strncat(jobs[i]->cmd, " ", 1);
+					strncat(jobs[i]->cmd, "&", 1);
+					printf("[%d]%s  %s        %s \n", jobs[i]->jobid, recent, s, jobs[i]->cmd);
+
+					jobs[i]->state = 1;
+					break;
+				}
+			}
+		}
+		else if (piping)
 		{
 			pipe(pipefd);
 			pid_t cpidL = fork();
 			if (cpidL == 0)
 			{
 				signal(SIGINT, SIG_DFL);
-				// setpgid(0, 0);
+				signal(SIGTSTP, SIG_DFL);
+				signal(SIGCHLD, SIG_DFL);
+				setpgid(0, 0);
 				close(pipefd[0]);
 				dup2(pipefd[1], STDOUT_FILENO);
 				processCommand(cmdL);
 			}
 			else
 			{
-				if (bg)
+				jobs[jobsLength - 1]->plist[0]->pid = cpidL;
+				jobs[jobsLength - 1]->plist[0]->pgid = cpidL;
+				if (fg)
 				{
-					do
-					{
-						int w = waitpid(cpid, &status, WNOHANG);
-						if (w == -1)
-						{
-							perror("waitpid");
-							exit(EXIT_FAILURE);
-						}
+					int status;
 
-						if (WIFEXITED(status))
+					currentFgJob = cpidL;
+					pid_t result = waitpid(cpidL, &status, WUNTRACED);
+					currentFgJob = 0;
+
+					signal(SIGINT, sigHandler);
+					signal(SIGTSTP, sigHandler);
+					signal(SIGCHLD, sigHandler);
+
+					for (int i = 0; i < jobsLength; i++)
+					{
+						if (jobs[i]->fg)
 						{
-							printf("exited, status=%d\n", WEXITSTATUS(status));
+							waitpid(cpid, &status, WNOHANG);
+
+							if (jobs[i]->state == 0 || WIFSIGNALED(status))
+							{
+								jobs[i]->state = -1;
+							}
+							else if (WIFSTOPPED(status))
+							{
+								//stopped
+								kill(jobs[i]->plist[0]->pid, SIGTSTP);
+								jobs[i]->state = 2;
+								jobs[i]->fg = false;
+							}
+							else if (WIFEXITED(status))
+							{
+								jobs[i]->state = 0;
+							}
+							else
+							{
+								jobs[i]->state = 1;
+							}
 						}
-						else if (WIFSIGNALED(status))
-						{
-							printf("killed by signal %d\n", WTERMSIG(status));
-						}
-						else if (WIFSTOPPED(status))
-						{
-							printf("stopped by signal %d\n", WSTOPSIG(status));
-						}
-						else if (WIFCONTINUED(status))
-						{
-							printf("continued\n");
-						}
-					} while (!WIFEXITED(status) && !WIFSIGNALED(status));
-				}
-				else
-				{
-					waitpid(cpidL, NULL, 0);
+					}
 				}
 			}
 
@@ -132,48 +294,58 @@ int main()
 			if (cpid == 0)
 			{
 				signal(SIGINT, SIG_DFL);
-				// setpgid(0, 0);
+				signal(SIGTSTP, SIG_DFL);
+				signal(SIGCHLD, SIG_DFL);
+				setpgid(0, cpidL);
 				close(pipefd[1]);
 				dup2(pipefd[0], STDIN_FILENO);
 				processCommand(cmdR);
 			}
 			else
 			{
+				jobs[jobsLength - 1]->plist[1]->pid = cpid;
+				jobs[jobsLength - 1]->plist[0]->pgid = cpidL;
 				close(pipefd[0]);
 				close(pipefd[1]);
-				if (bg)
+				if (fg)
 				{
-					do
-					{
-						int w = waitpid(cpid, &status, WNOHANG);
-						if (w == -1)
-						{
-							perror("waitpid");
-							exit(EXIT_FAILURE);
-						}
+					int status;
 
-						if (WIFEXITED(status))
+					currentFgJob = cpidL;
+					pid_t result = waitpid(cpidL, &status, WUNTRACED);
+					currentFgJob = 0;
+
+					signal(SIGINT, sigHandler);
+					signal(SIGTSTP, sigHandler);
+					signal(SIGCHLD, sigHandler);
+
+					for (int i = 0; i < jobsLength; i++)
+					{
+						if (jobs[i]->fg)
 						{
-							printf("exited, status=%d\n", WEXITSTATUS(status));
+							waitpid(cpid, &status, WNOHANG);
+
+							if (jobs[i]->state == 0 || WIFSIGNALED(status))
+							{
+								jobs[i]->state = -1;
+							}
+							else if (WIFSTOPPED(status))
+							{
+								//stopped
+								kill(jobs[i]->plist[0]->pid, SIGTSTP);
+								jobs[i]->state = 2;
+								jobs[i]->fg = false;
+							}
+							else if (WIFEXITED(status))
+							{
+								jobs[i]->state = 0;
+							}
+							else
+							{
+								jobs[i]->state = 1;
+							}
 						}
-						else if (WIFSIGNALED(status))
-						{
-							printf("killed by signal %d\n", WTERMSIG(status));
-						}
-						else if (WIFSTOPPED(status))
-						{
-							printf("stopped by signal %d\n", WSTOPSIG(status));
-						}
-						else if (WIFCONTINUED(status))
-						{
-							printf("continued\n");
-						}
-					} while (!WIFEXITED(status) && !WIFSIGNALED(status));
-				}
-				else
-				{
-					// tcsetpgrp(0, cpidL);
-					waitpid(cpid, NULL, 0);
+					}
 				}
 			}
 		}
@@ -182,48 +354,77 @@ int main()
 			cpid = fork();
 			if (cpid == 0)
 			{
+
 				signal(SIGINT, SIG_DFL);
-				// printf("%d", setpgid(0, 0));
+				signal(SIGTSTP, SIG_DFL);
+				signal(SIGCHLD, SIG_DFL);
+				setpgid(0, 0);
 				processCommand(parsedcmd);
 			}
 			else
 			{
-				if (bg)
+				jobs[jobsLength - 1]->plist[0]->pid = cpid;
+				jobs[jobsLength - 1]->plist[0]->pgid = cpid;
+				if (fg)
 				{
-					do
-					{
-						int w = waitpid(cpid, &status, WNOHANG);
-						if (w == -1)
-						{
-							perror("waitpid");
-							exit(EXIT_FAILURE);
-						}
+					int status;
 
-						if (WIFEXITED(status))
+					currentFgJob = cpid;
+					pid_t result = waitpid(cpid, &status, WUNTRACED);
+					currentFgJob = 0;
+
+					signal(SIGINT, sigHandler);
+					signal(SIGTSTP, sigHandler);
+					signal(SIGCHLD, sigHandler);
+
+					for (int i = 0; i < jobsLength; i++)
+					{
+						if (jobs[i]->fg)
 						{
-							printf("exited, status=%d\n", WEXITSTATUS(status));
+							waitpid(cpid, &status, WNOHANG);
+
+							if (jobs[i]->state == 0 || WIFSIGNALED(status))
+							{
+								jobs[i]->state = -1;
+							}
+							else if (WIFSTOPPED(status))
+							{
+								//stopped
+								kill(jobs[i]->plist[0]->pid, SIGTSTP);
+								jobs[i]->state = 2;
+								jobs[i]->fg = false;
+							}
+							else if (WIFEXITED(status))
+							{
+								jobs[i]->state = 0;
+							}
+							else
+							{
+								jobs[i]->state = 1;
+							}
 						}
-						else if (WIFSIGNALED(status))
-						{
-							printf("killed by signal %d\n", WTERMSIG(status));
-						}
-						else if (WIFSTOPPED(status))
-						{
-							printf("stopped by signal %d\n", WSTOPSIG(status));
-						}
-						else if (WIFCONTINUED(status))
-						{
-							printf("continued\n");
-						}
-					} while (!WIFEXITED(status) && !WIFSIGNALED(status));
-				}
-				else
-				{
-					waitpid(cpid, NULL, 0);
+					}
 				}
 			}
 		}
+
+		printBgJobs();
+
+		cleanUpJobs();
 	}
+
+	// fix seg fault
+
+	// for (int i = 0; i < jobsLength; i++)
+	// {
+	// 	for (int i = 0; i < jobs[i]->nproc; i++)
+	// 	{
+	// 		free(jobs[i]->plist[i]);
+	// 	}
+	// 	free(jobs[i]);
+	// }
+
+	// free(jobs);
 }
 
 void parseString(char *str, char **tokens)
@@ -326,9 +527,126 @@ void processCommand(char **parsedcmd)
 	}
 }
 
+void cleanUpJobs()
+{
+	int removeIndex[jobsLength];
+
+	int counter = 0;
+	for (int i = 0; i < jobsLength; i++)
+	{
+		if (jobs[i]->state == -1)
+		{
+			removeIndex[counter] = i;
+			counter++;
+		}
+	}
+
+	for (int i = 0; i < counter; i++)
+	{
+		for (int j = removeIndex[i]; j < jobsLength - 1; j++)
+		{
+			jobs[j] = jobs[j + 1];
+		}
+
+		for (int j = i + 1; j < counter; j++)
+		{
+			removeIndex[j] = removeIndex[j] - 1;
+		}
+	}
+
+	jobsLength -= counter;
+
+	jobNo = 1;
+	if (jobsLength > 0)
+	{
+		if (jobs[jobsLength - 1]->jobid >= jobNo)
+		{
+			jobNo = jobs[jobsLength - 1]->jobid + 1;
+		}
+	}
+}
+
+void printJobs()
+{
+	for (int i = 0; i < jobsLength; i++)
+	{
+		char *recent = i == jobsLength - 1 ? "+" : "-";
+		char *s = "";
+
+		if (jobs[i]->state == 0)
+		{
+			s = "Done";
+		}
+		else if (jobs[i]->state == 1)
+		{
+			s = "Running";
+		}
+		else if (jobs[i]->state == 2)
+		{
+			s = "Stopped";
+		}
+		else
+		{
+			jobs[i]->state = -1;
+			s = "";
+		}
+
+		if (strcmp(s, "") != 0)
+			printf("[%d]%s  %s        %s \n", jobs[i]->jobid, recent, s, jobs[i]->cmd);
+
+		if (jobs[i]->state == 0)
+		{
+			jobs[i]->state = -1;
+		}
+	}
+}
+
+void printBgJobs()
+{
+	for (int i = 0; i < jobsLength; i++)
+	{
+		// printf("%s %d\n\n", jobs[i]->cmd, jobs[i]->state);
+		if (!jobs[i]->fg)
+		{
+			char *recent = i == jobsLength - 1 ? "+" : "-";
+			char *s = "";
+
+			if (jobs[i]->state == 0)
+			{
+				s = "Done";
+			}
+
+			if (strcmp(s, "Done") == 0)
+				printf("[%d]%s  %s        %s \n", jobs[i]->jobid, recent, s, jobs[i]->cmd);
+		}
+		if (jobs[i]->state == 0)
+		{
+			jobs[i]->state = -1;
+		}
+	}
+}
+
 void sigHandler(int signo)
 {
-	pid_t pid = getpid();
+	int status;
+	int pid;
+	int errnum;
+
+	if (currentFgJob > 0)
+	{
+		if (signo == SIGTSTP)
+		{
+			for (int i = 0; i < jobsLength; i++)
+			{
+				if (currentFgJob == jobs[i]->plist[0]->pgid)
+				{
+					jobs[i]->fg = false;
+					jobs[i]->state = 2;
+				}
+			}
+		}
+		kill(-1 * currentFgJob, signo);
+	}
 
 	switch (signo)
 	{
@@ -339,11 +657,52 @@ void sigHandler(int signo)
 		break;
 	case SIGTSTP:
 		//ctrl-z
-		//send sigtsto to current foreground process
+		//send sigtstp to current foreground process
+		printf("\n");
+		break;
+	case SIGCHLD:
+		pid = waitpid(-1, NULL, WNOHANG);
+		// if (pid == -1)
+		// {
+		// 	errnum = errno;
+		// 	fprintf(stderr, "Error waitpid: %s\n", strerror(errnum));
+		// }
+
+		// printf("caught sigchld %d \n", pid);
+		for (int i = 0; i < jobsLength; i++)
+		{
+			if (pid == jobs[i]->plist[0]->pgid)
+			{
+				// 	jobs[i]->state = 0;
+				// 	// printf("%s \n", jobs[i]->cmd);
+				// }
+				if (jobs[i]->state == 0 || WIFSIGNALED(status))
+				{
+					jobs[i]->state = -1;
+				}
+				else if (WIFSTOPPED(status))
+				{
+					//stopped
+					kill(jobs[i]->plist[0]->pid, SIGTSTP);
+					jobs[i]->state = 2;
+					jobs[i]->fg = false;
+				}
+				else if (WIFEXITED(status))
+				{
+					jobs[i]->state = 0;
+				}
+				else
+				{
+					jobs[i]->state = 1;
+				}
+			}
+		}
 		break;
 	case EOF:
 		exit(0);
 		break;
 	}
 	signal(SIGINT, sigHandler);
+	signal(SIGTSTP, sigHandler);
+	signal(SIGCHLD, sigHandler);
 }
