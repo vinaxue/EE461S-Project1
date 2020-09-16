@@ -50,7 +50,7 @@ int main()
 	int pipefd[2];
 	int status;
 	char *inString;
-	char *parsedcmd[64] = {NULL};
+	char *parsedcmd[2001] = {NULL};
 	char *to_free;
 
 	jobNo = 1;
@@ -80,9 +80,18 @@ int main()
 
 		parseString(inString, parsedcmd, &to_free);
 
+		int counter = 0;
+		while (parsedcmd[counter] != (char *)NULL)
+		{
+			counter++;
+		}
+
+		if (counter == 0)
+			continue;
+
 		int i = 0;
-		char *cmdL[64] = {NULL};
-		char *cmdR[64] = {NULL};
+		char *cmdL[2001] = {NULL};
+		char *cmdR[2001] = {NULL};
 		int l = 0;
 
 		while (parsedcmd[l] != (char *)NULL)
@@ -133,6 +142,7 @@ int main()
 
 		if (!jobCmd && !bgCmd && !fgCmd)
 		{
+			// printf("job length: %d", jobsLength);
 			jobs[jobsLength]->jobid = jobNo;
 			jobs[jobsLength]->cmd = inString;
 			jobs[jobsLength]->state = 1;
@@ -466,6 +476,7 @@ bool fileRedirection(char **parsedcmd, bool *invalidFile)
 			else
 			{
 				*invalidFile = true;
+				fprintf(stderr, "bash: %s: No such file or directory\n", parsedcmd[i + 1]);
 			}
 			fileRedirect = true;
 		}
@@ -494,18 +505,22 @@ void processCommand(char **parsedcmd)
 {
 	bool invalidFile = false;
 	bool fileRedirect = fileRedirection(parsedcmd, &invalidFile);
+	int n = 0;
+	char *fullCmd = "";
 
 	if (fileRedirect)
 	{
 		if (!invalidFile)
 		{
-			char *cmd[64] = {NULL};
+			char *cmd[2001] = {NULL};
 			int i = 0;
 			while (parsedcmd[i] != (char *)NULL)
 			{
 				if (strcmp(parsedcmd[i], ">") != 0 && strcmp(parsedcmd[i], "<") != 0 && strcmp(parsedcmd[i], "2>") != 0)
 				{
 					cmd[i] = parsedcmd[i];
+					strcat(fullCmd, parsedcmd[i]);
+					strcat(fullCmd, " ");
 				}
 				else
 				{
@@ -514,12 +529,30 @@ void processCommand(char **parsedcmd)
 				i++;
 			}
 
-			execvp(cmd[0], cmd);
+			n = execvp(cmd[0], cmd);
 		}
 	}
 	else
 	{
-		execvp(parsedcmd[0], parsedcmd);
+		int i = 0;
+		while (parsedcmd[i] != (char *)NULL)
+		{
+			strcat(fullCmd, parsedcmd[i]);
+			strcat(fullCmd, " ");
+			i++;
+		}
+		n = execvp(parsedcmd[0], parsedcmd);
+	}
+
+	if (n == -1)
+	{
+		for (int i = 0; i < 20; i++)
+		{
+			if (strcmp(jobs[i]->cmd, fullCmd) == 0)
+			{
+				jobs[i]->state = -1;
+			}
+		}
 	}
 }
 
@@ -560,6 +593,10 @@ void cleanUpJobs()
 			jobNo = jobs[jobsLength - 1]->jobid + 1;
 		}
 	}
+
+	job **tmp = (job **)realloc(jobs, sizeof(job *) * 20);
+	if (tmp)
+		jobs = tmp;
 }
 
 void printJobs()
